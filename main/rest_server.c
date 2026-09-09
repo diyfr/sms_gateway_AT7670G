@@ -19,6 +19,8 @@
 #include "freertos/task.h"
 #include "cJSON.h"
 #include "board.h"
+#include "power.h"
+#include "contacts.h"
 #include "esp_modem_api.h"
 
 
@@ -272,6 +274,168 @@ static esp_err_t sms_delete_handler(httpd_req_t *req) {
 
 static const char *TAG = "esp-rest";
 
+/**
+ * GET /api/v1/contacts
+ * Liste les contacts enregistrés (pas de protection, destiné à l'affichage public sur la page d'accueil)
+ */
+static esp_err_t contacts_list_get_handler(httpd_req_t *req)
+{
+    add_cors_header(req);
+
+    char *json_array = contacts_list_json();
+    if (json_array == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur d'allocation JSON");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json_array);
+    free(json_array);
+    return ESP_OK;
+}
+
+// Extrait les champs 'name'/'phone' du corps JSON de la requête ; renvoie false et une erreur HTTP si invalide
+static bool parse_contact_body(httpd_req_t *req, char *name_out, size_t name_out_size, char *phone_out, size_t phone_out_size)
+{
+    char buf[128] = {0};
+    if (req->content_len == 0 || req->content_len >= sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Payload invalide");
+        return false;
+    }
+    int received = httpd_req_recv(req, buf, req->content_len);
+    if (received <= 0) {
+        return false;
+    }
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "JSON invalide");
+        return false;
+    }
+
+    cJSON *name = cJSON_GetObjectItem(root, "name");
+    cJSON *phone = cJSON_GetObjectItem(root, "phone");
+    if (!name || !phone || !name->valuestring || !phone->valuestring) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Champs 'name' et 'phone' requis");
+        cJSON_Delete(root);
+        return false;
+    }
+
+    strlcpy(name_out, name->valuestring, name_out_size);
+    strlcpy(phone_out, phone->valuestring, phone_out_size);
+    cJSON_Delete(root);
+    return true;
+}
+
+/**
+ * POST /api/v1/contacts
+ * Corps attendu (JSON) : {"name": "...", "phone": "+33..."}
+ */
+static esp_err_t contacts_create_post_handler(httpd_req_t *req)
+{
+    if (!authenticate_request(req)) {
+        return ESP_FAIL;
+    }
+    add_cors_header(req);
+
+    char name[CONTACTS_NAME_MAX_LEN] = {0};
+    char phone[CONTACTS_PHONE_MAX_LEN] = {0};
+    if (!parse_contact_body(req, name, sizeof(name), phone, sizeof(phone))) {
+        return ESP_FAIL;
+    }
+
+    int new_id = -1;
+    esp_err_t err = contacts_add(name, phone, &new_id);
+    if (err == ESP_ERR_NO_MEM) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Nombre maximum de contacts atteint (5)");
+        return ESP_FAIL;
+    } else if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Échec de l'ajout du contact");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"status\":\"success\",\"id\":%d}", new_id);
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+/**
+ * PUT /api/v1/contacts?id=X
+ * Corps attendu (JSON) : {"name": "...", "phone": "+33..."}
+ */
+static esp_err_t contacts_update_put_handler(httpd_req_t *req)
+{
+    if (!authenticate_request(req)) {
+        return ESP_FAIL;
+    }
+    add_cors_header(req);
+
+    char query[64] = {0};
+    char value[16] = {0};
+    int id;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "id", value, sizeof(value)) != ESP_OK ||
+        !parse_positive_int(value, &id)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Paramètre 'id' requis et doit être un entier positif");
+        return ESP_FAIL;
+    }
+
+    char name[CONTACTS_NAME_MAX_LEN] = {0};
+    char phone[CONTACTS_PHONE_MAX_LEN] = {0};
+    if (!parse_contact_body(req, name, sizeof(name), phone, sizeof(phone))) {
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = contacts_update(id, name, phone);
+    if (err == ESP_ERR_NOT_FOUND) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Contact introuvable");
+        return ESP_FAIL;
+    } else if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Échec de la mise à jour du contact");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"success\"}");
+    return ESP_OK;
+}
+
+/**
+ * DELETE /api/v1/contacts?id=X
+ */
+static esp_err_t contacts_delete_handler(httpd_req_t *req)
+{
+    if (!authenticate_request(req)) {
+        return ESP_FAIL;
+    }
+    add_cors_header(req);
+
+    char query[64] = {0};
+    char value[16] = {0};
+    int id;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "id", value, sizeof(value)) != ESP_OK ||
+        !parse_positive_int(value, &id)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Paramètre 'id' requis et doit être un entier positif");
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = contacts_delete(id);
+    if (err == ESP_ERR_NOT_FOUND) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Contact introuvable");
+        return ESP_FAIL;
+    } else if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Échec de la suppression du contact");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"success\"}");
+    return ESP_OK;
+}
+
 /* Page d'accueil minimale embarquée dans le firmware */
 static const char INDEX_HTML[] =
     "<!DOCTYPE html><html><head><meta charset='utf-8'>"
@@ -282,6 +446,7 @@ static const char INDEX_HTML[] =
     "<h1>ESP A7670G Dashboard</h1>"
     "<h2>Système</h2><table id='system'></table>"
     "<h2>Modem / Board</h2><table id='board'></table>"
+    "<h2>Contacts</h2><table id='contacts'></table>"
     "<script>"
     "function fillTable(id, data) {"
     "  const t = document.getElementById(id);"
@@ -292,6 +457,16 @@ static const char INDEX_HTML[] =
     "    row.insertCell().innerText = data[key];"
     "  }"
     "}"
+    "function fillContacts(list) {"
+    "  const t = document.getElementById('contacts');"
+    "  t.innerHTML = '<tr><td class=\"k\">Id</td><td class=\"k\">Nom</td><td class=\"k\">Numéro</td></tr>';"
+    "  for (const c of list) {"
+    "    const row = t.insertRow();"
+    "    row.insertCell().innerText = c.id;"
+    "    row.insertCell().innerText = c.name;"
+    "    row.insertCell().innerText = c.phone;"
+    "  }"
+    "}"
     "async function refresh() {"
     "  try {"
     "    const sys = await (await fetch('/api/v1/system/info')).json();"
@@ -300,6 +475,10 @@ static const char INDEX_HTML[] =
     "  try {"
     "    const board = await (await fetch('/api/v1/board/status')).json();"
     "    fillTable('board', board);"
+    "  } catch (e) { console.error(e); }"
+    "  try {"
+    "    const contacts = await (await fetch('/api/v1/contacts')).json();"
+    "    fillContacts(contacts);"
     "  } catch (e) { console.error(e); }"
     "}"
     "refresh();"
@@ -331,6 +510,8 @@ static esp_err_t system_info_get_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(root, "cores", chip_info.cores);
     cJSON_AddStringToObject(root, "app_version", app_desc->version);
     cJSON_AddStringToObject(root, "project_name", app_desc->project_name);
+    cJSON_AddNumberToObject(root, "battery_mv", power_get_battery_mv());
+    cJSON_AddNumberToObject(root, "solar_mv", power_get_solar_mv());
     const char *sys_info = cJSON_Print(root);
     httpd_resp_sendstr(req, sys_info);
     free((void *)sys_info);
@@ -362,6 +543,8 @@ esp_err_t start_rest_server(void)
     // Les commandes AT + parsing SMS empilent plusieurs buffers via des appels C++ profonds (esp_modem) :
     // la pile par défaut de 4096 octets ne suffit pas et provoque un stack overflow.
     config.stack_size = 8192;
+    // Défaut de 8 handlers insuffisant maintenant que /api/v1/contacts enregistre 4 méthodes distinctes
+    config.max_uri_handlers = 16;
 
     ESP_LOGI(TAG, "Starting HTTP Server");
     ESP_RETURN_ON_ERROR(httpd_start(&server, &config), TAG, "Failed to start http server");
@@ -438,6 +621,39 @@ esp_err_t start_rest_server(void)
         .user_ctx = NULL
     };
     httpd_register_uri_handler(server, &system_reboot_uri);
+
+    /* Routes CRUD pour les contacts (liste publique, mutations protégées) */
+    httpd_uri_t contacts_list_uri = {
+        .uri      = "/api/v1/contacts",
+        .method   = HTTP_GET,
+        .handler  = contacts_list_get_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &contacts_list_uri);
+
+    httpd_uri_t contacts_create_uri = {
+        .uri      = "/api/v1/contacts",
+        .method   = HTTP_POST,
+        .handler  = contacts_create_post_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &contacts_create_uri);
+
+    httpd_uri_t contacts_update_uri = {
+        .uri      = "/api/v1/contacts",
+        .method   = HTTP_PUT,
+        .handler  = contacts_update_put_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &contacts_update_uri);
+
+    httpd_uri_t contacts_delete_uri = {
+        .uri      = "/api/v1/contacts",
+        .method   = HTTP_DELETE,
+        .handler  = contacts_delete_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &contacts_delete_uri);
 
     return ESP_OK;
 }

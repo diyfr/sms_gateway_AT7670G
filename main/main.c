@@ -8,6 +8,8 @@
 #include "wifi_prov.h"
 #include "esp_modem_api.h"
 #include "board.h" // Contient vos signatures de fonctions SMS
+#include "power.h"
+#include "contacts.h"
 
 
 esp_modem_dce_t *global_modem = NULL;
@@ -38,7 +40,9 @@ static void initialise_mdns(void)
 
 void app_main(void)
 {
+    power_hold_board_on(); // Doit être fait avant tout le reste pour rester alimenté sur batterie
     ESP_ERROR_CHECK(nvs_flash_init());
+    ESP_ERROR_CHECK(contacts_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     global_modem = initialize_modem();
@@ -46,6 +50,7 @@ void app_main(void)
         ESP_LOGE(TAG, "Modem initialization failed");
         return;
     }
+    power_start_battery_monitor();
 
     
     initialise_mdns();

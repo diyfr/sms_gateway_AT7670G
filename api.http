@@ -19,6 +19,9 @@ GET http://{{host}}/api/v1/system/info
 ### manufacturer, model, revision, imei)
 GET http://{{host}}/api/v1/board/status
 
+### Liste des contacts enregistrés
+GET http://{{host}}/api/v1/contacts
+
 ### =========================================================
 ### Routes protégées (en-tête X-API-Key requis)
 ### =========================================================
@@ -47,6 +50,30 @@ x-api-key: {{apKey}}
 
 ### Redémarrer l'appareil
 POST http://{{host}}/api/v1/system/reboot
+x-api-key: {{apKey}}
+
+### Ajouter un contact (5 maximum)
+POST http://{{host}}/api/v1/contacts
+Content-Type: application/json
+x-api-key: {{apKey}}
+
+{
+    "name": "diyfr",
+    "phone": "{{targetNumber}}"
+}
+
+### Modifier un contact existant
+PUT http://{{host}}/api/v1/contacts?id=1
+Content-Type: application/json
+x-api-key: {{apKey}}
+
+{
+    "name": "diyfr@github.com",
+    "phone": "{{targetNumber}}"
+}
+
+### Supprimer un contact
+DELETE http://{{host}}/api/v1/contacts?id=1
 x-api-key: {{apKey}}
 
 ### =========================================================
