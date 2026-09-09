@@ -1,0 +1,12 @@
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_example.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions_example.csv"
+
+# esp_modem_at_raw() tronque sa réponse à cette taille (défaut 128 octets, trop court pour AT+CMGL
+# avec plusieurs SMS). Les buffers qui reçoivent directement cette réponse dans board.c doivent
+# être au moins aussi grands.
+CONFIG_ESP_MODEM_C_API_STR_MAX=2048
+
+# Nom d'hôte visible sur le réseau (DHCP), au lieu du défaut "espressif"
+CONFIG_LWIP_LOCAL_HOSTNAME="esp32gw"

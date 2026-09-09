@@ -1,0 +1,64 @@
+### Variables
+@host = 192.168.0.80
+@apKey = {{$dotenv API_KEY}}
+
+@targetNumber = {{$dotenv TARGET_NUMBER}}
+
+### =========================================================
+### Routes publiques (aucune protection, X-API-Key non requis)
+### =========================================================
+
+### Page d'accueil (dashboard HTML embarqué)
+GET http://{{host}}/
+
+### Infos système (chip, idf_version, cores, app_version, project_name)
+GET http://{{host}}/api/v1/system/info
+
+### Statut du modem/board (is_up, signal_rssi, modem_time, sms_count,
+### sms_max_capacity, smsc, network_registered, network_reg_status,
+### manufacturer, model, revision, imei)
+GET http://{{host}}/api/v1/board/status
+
+### =========================================================
+### Routes protégées (en-tête X-API-Key requis)
+### =========================================================
+
+### Envoyer un SMS
+POST http://{{host}}/api/v1/sms/send
+Content-Type: application/json
+x-api-key: {{apKey}}
+
+{
+    "to": "{{targetNumber}}",
+    "text": "Message de test"
+}
+
+### Lister les SMS stockés sur la SIM
+GET http://{{host}}/api/v1/sms/list
+x-api-key: {{apKey}}
+
+### Lire un SMS précis
+GET http://{{host}}/api/v1/sms/read?index=1
+x-api-key: {{apKey}}
+
+### Supprimer un SMS précis
+DELETE http://{{host}}/api/v1/sms/delete?index=1
+x-api-key: {{apKey}}
+
+### Redémarrer l'appareil
+POST http://{{host}}/api/v1/system/reboot
+x-api-key: {{apKey}}
+
+### =========================================================
+### Portail de provisioning WiFi (uniquement quand l'appareil
+### démarre en mode SoftAP "ESP32-Setup", pas de protection)
+### =========================================================
+
+### Formulaire de configuration WiFi
+GET http://192.168.4.1/
+
+### Enregistrer le SSID/mot de passe (redémarre l'appareil après coup)
+POST http://192.168.4.1/save
+Content-Type: application/x-www-form-urlencoded
+
+ssid=MonReseauWifi&password=MonMotDePasse

@@ -1,0 +1,16 @@
+menu "Example Configuration"
+
+    config EXAMPLE_MDNS_HOST_NAME
+        string "mDNS Host Name"
+        default "dashboard"
+        help
+            Specify the domain name used in the mDNS service.
+            Note that webpage also take it as a part of URL where it will send GET/POST requests to.
+
+    config REST_API_KEY
+        string "Clé API pour protéger les endpoints REST"
+        default "changeme"
+        help
+            Clé attendue dans l'en-tête HTTP "X-API-Key" pour toutes les requêtes vers /api/v1/*.
+            Changez impérativement cette valeur avant toute mise en production.
+endmenu

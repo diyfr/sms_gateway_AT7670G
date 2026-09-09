@@ -1,0 +1,5 @@
+## IDF Component Manager Manifest File
+dependencies:
+  espressif/cjson: "^1.7.19"
+  espressif/mdns: "^1.8.0"
+  espressif/esp_modem: "^2.1.0"
