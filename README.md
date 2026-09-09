@@ -21,7 +21,14 @@ Carte type **LilyGo T-A7670G** (ESP32 + modem A7670G) :
 - **Provisioning WiFi** : au premier démarrage (ou si les identifiants enregistrés ne fonctionnent plus), l'appareil ouvre un point d'accès WiFi `ESP32-Setup` avec un formulaire web (`http://192.168.4.1/`) pour saisir le SSID/mot de passe du réseau. Les identifiants sont sauvegardés en NVS et l'appareil redémarre pour s'y connecter.
 - **Envoi / lecture / liste / suppression de SMS** via des commandes AT (mode texte). La liste et la lecture retournent du JSON structuré (id, statut, expéditeur, horodatage, texte), obtenu en interrogeant chaque emplacement SIM individuellement (`AT+CMGR`) plutôt qu'en parsant la réponse multi-lignes `AT+CMGL`.
 - **Carnet de contacts** (5 maximum) : CRUD persisté en NVS, liste visible sur le tableau de bord.
-- **Alerte SMS batterie/secteur** : toutes les minutes, si la tension batterie passe sous 3800 mV (et reste au-dessus de 3000 mV, pour ignorer l'absence de batterie), un SMS "Gateway sur batterie" est envoyé à tous les contacts. Au retour au-dessus de 3950 mV, un SMS "Gateway sur secteur" est envoyé. L'état est persisté en NVS pour ne pas renvoyer l'alerte après un redémarrage (la bascule secteur/batterie peut provoquer un reset).
+- **Alerte SMS batterie/secteur** : toutes les minutes, la tension batterie est classée en 3 niveaux, et un SMS est envoyé à tous les contacts uniquement lors d'un changement de niveau :
+  - ≥ 4000 mV → **secteur** ("Gateway sur secteur")
+  - [3700, 3900) mV → **sur batterie** ("Gateway sur batterie")
+  - [3000, 3700) mV → **batterie critique** ("Gateway batterie niveau critique")
+  - < 3000 mV → ignoré (pas de batterie connectée / lecture non fiable)
+  - [3900, 4000) mV → zone tampon (hystérésis), aucun changement d'état
+
+  Le niveau est persisté en NVS pour ne pas renvoyer l'alerte après un redémarrage (la bascule secteur/batterie peut provoquer un reset).
 - **Alimentation & énergie** : maintien de la carte sous tension sur batterie (sans USB), lecture des tensions batterie/solaire.
 - **Tableau de bord web** intégré au firmware (`GET /`), affichant en direct les informations système, l'état du modem et les contacts.
 - **API REST** (`/api/v1/*`) protégée par une clé API (`X-API-Key`) pour les actions sensibles, avec mDNS (`<hostname>.local`) pour la découverte sur le réseau local.

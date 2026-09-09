@@ -108,33 +108,41 @@ int power_get_solar_mv(void)
     return power_read_channel_mv(SOLAR_ADC_CHANNEL);
 }
 
-#define BATTERY_LOW_MV        3800
-#define BATTERY_RESTORED_MV   3950
+// Niveaux d'alimentation, ordonnés par gravité croissante
+typedef enum {
+    POWER_LEVEL_MAINS    = 0, // >= BATTERY_MAINS_MV : secteur
+    POWER_LEVEL_BATTERY  = 1, // [BATTERY_CRITICAL_MV, BATTERY_LOW_MV) : sur batterie
+    POWER_LEVEL_CRITICAL = 2, // [BATTERY_MIN_PLAUSIBLE_MV, BATTERY_CRITICAL_MV) : batterie critique
+} power_level_t;
+
+#define BATTERY_MAINS_MV         4000
+#define BATTERY_LOW_MV           3900
+#define BATTERY_CRITICAL_MV      3700
 #define BATTERY_MIN_PLAUSIBLE_MV 3000 // En dessous : probablement pas de batterie connectée, on ignore
 #define BATTERY_MONITOR_PERIOD_MS (60 * 1000)
 #define POWER_NVS_NAMESPACE   "power"
-#define POWER_NVS_KEY_ON_BATT "on_batt"
+#define POWER_NVS_KEY_LEVEL   "batt_level"
 
-// Relit l'état "alerte batterie déjà envoyée" persisté en NVS (survit à un redémarrage)
-static bool power_load_on_battery_flag(void)
+// Relit le dernier niveau notifié, persisté en NVS (survit à un redémarrage) ; secteur par défaut
+static power_level_t power_load_level(void)
 {
     nvs_handle_t handle;
     if (nvs_open(POWER_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
-        return false;
+        return POWER_LEVEL_MAINS;
     }
-    uint8_t value = 0;
-    esp_err_t err = nvs_get_u8(handle, POWER_NVS_KEY_ON_BATT, &value);
+    uint8_t value = POWER_LEVEL_MAINS;
+    esp_err_t err = nvs_get_u8(handle, POWER_NVS_KEY_LEVEL, &value);
     nvs_close(handle);
-    return (err == ESP_OK) && (value != 0);
+    return (err == ESP_OK) ? (power_level_t)value : POWER_LEVEL_MAINS;
 }
 
-static void power_save_on_battery_flag(bool on_battery)
+static void power_save_level(power_level_t level)
 {
     nvs_handle_t handle;
     if (nvs_open(POWER_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
         return;
     }
-    nvs_set_u8(handle, POWER_NVS_KEY_ON_BATT, on_battery ? 1 : 0);
+    nvs_set_u8(handle, POWER_NVS_KEY_LEVEL, (uint8_t)level);
     nvs_commit(handle);
     nvs_close(handle);
 }
@@ -154,23 +162,50 @@ static void power_notify_contacts(const char *message)
     }
 }
 
+// Détermine le niveau correspondant à la tension lue ; conserve le niveau précédent dans les zones
+// tampon (hystérésis) et quand la lecture est trop basse pour être plausible (pas de batterie).
+static power_level_t power_level_from_voltage(int battery_mv, power_level_t previous_level)
+{
+    if (battery_mv < BATTERY_MIN_PLAUSIBLE_MV) {
+        return previous_level;
+    }
+    if (battery_mv >= BATTERY_MAINS_MV) {
+        return POWER_LEVEL_MAINS;
+    }
+    if (battery_mv < BATTERY_CRITICAL_MV) {
+        return POWER_LEVEL_CRITICAL;
+    }
+    if (battery_mv < BATTERY_LOW_MV) {
+        return POWER_LEVEL_BATTERY;
+    }
+    return previous_level; // Zone tampon [BATTERY_LOW_MV, BATTERY_MAINS_MV)
+}
+
 static void battery_monitor_task(void *arg)
 {
-    bool on_battery = power_load_on_battery_flag();
+    power_level_t level = power_load_level();
 
     while (1) {
         int battery_mv = power_get_battery_mv();
         if (battery_mv > 0) {
-            if (!on_battery && battery_mv < BATTERY_LOW_MV && battery_mv > BATTERY_MIN_PLAUSIBLE_MV) {
-                ESP_LOGW(TAG, "Tension batterie basse (%d mV) : passage sur batterie", battery_mv);
-                power_notify_contacts("Gateway sur batterie");
-                on_battery = true;
-                power_save_on_battery_flag(true);
-            } else if (on_battery && battery_mv > BATTERY_RESTORED_MV) {
-                ESP_LOGI(TAG, "Tension batterie rétablie (%d mV) : retour secteur", battery_mv);
-                power_notify_contacts("Gateway sur secteur");
-                on_battery = false;
-                power_save_on_battery_flag(false);
+            power_level_t new_level = power_level_from_voltage(battery_mv, level);
+            if (new_level != level) {
+                switch (new_level) {
+                    case POWER_LEVEL_MAINS:
+                        ESP_LOGI(TAG, "Tension batterie %d mV : retour secteur", battery_mv);
+                        power_notify_contacts("Gateway sur secteur");
+                        break;
+                    case POWER_LEVEL_BATTERY:
+                        ESP_LOGW(TAG, "Tension batterie %d mV : passage sur batterie", battery_mv);
+                        power_notify_contacts("Gateway sur batterie");
+                        break;
+                    case POWER_LEVEL_CRITICAL:
+                        ESP_LOGE(TAG, "Tension batterie %d mV : niveau critique", battery_mv);
+                        power_notify_contacts("Gateway batterie niveau critique");
+                        break;
+                }
+                level = new_level;
+                power_save_level(level);
             }
         }
         vTaskDelay(pdMS_TO_TICKS(BATTERY_MONITOR_PERIOD_MS));

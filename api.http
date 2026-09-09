@@ -73,7 +73,7 @@ x-api-key: {{apKey}}
 }
 
 ### Supprimer un contact
-DELETE http://{{host}}/api/v1/contacts?id=1
+DELETE http://{{host}}/api/v1/contacts?id=2
 x-api-key: {{apKey}}
 
 ### =========================================================
