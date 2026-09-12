@@ -21,6 +21,7 @@
 #include "board.h"
 #include "power.h"
 #include "contacts.h"
+#include "meian.h"
 #include "esp_modem_api.h"
 
 
@@ -44,12 +45,19 @@ static bool api_key_matches(const char *provided)
     return diff == 0;
 }
 
+// Vérifie si l'en-tête X-API-Key fourni est valide, sans jamais renvoyer d'erreur HTTP
+// (utilisé pour moduler le contenu d'une réponse publique selon le niveau de confiance du client)
+static bool has_valid_api_key(httpd_req_t *req)
+{
+    char provided_key[65] = {0};
+    return httpd_req_get_hdr_value_str(req, API_KEY_HEADER_NAME, provided_key, sizeof(provided_key)) == ESP_OK &&
+           api_key_matches(provided_key);
+}
+
 // Vérifie l'en-tête X-API-Key sur chaque requête protégée ; envoie 401 et renvoie false si invalide
 static bool authenticate_request(httpd_req_t *req)
 {
-    char provided_key[65] = {0};
-    if (httpd_req_get_hdr_value_str(req, API_KEY_HEADER_NAME, provided_key, sizeof(provided_key)) != ESP_OK ||
-        !api_key_matches(provided_key)) {
+    if (!has_valid_api_key(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Clé API manquante ou invalide");
         return false;
     }
@@ -276,13 +284,15 @@ static const char *TAG = "esp-rest";
 
 /**
  * GET /api/v1/contacts
- * Liste les contacts enregistrés (pas de protection, destiné à l'affichage public sur la page d'accueil)
+ * Liste les contacts enregistrés (pas de protection ; le champ 'pin' n'est inclus
+ * que si une clé API valide est fournie, afin de ne jamais exposer les codes en clair
+ * aux clients anonymes qui consultent la page d'accueil)
  */
 static esp_err_t contacts_list_get_handler(httpd_req_t *req)
 {
     add_cors_header(req);
 
-    char *json_array = contacts_list_json();
+    char *json_array = contacts_list_json(has_valid_api_key(req));
     if (json_array == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur d'allocation JSON");
         return ESP_FAIL;
@@ -294,8 +304,9 @@ static esp_err_t contacts_list_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-// Extrait les champs 'name'/'phone' du corps JSON de la requête ; renvoie false et une erreur HTTP si invalide
-static bool parse_contact_body(httpd_req_t *req, char *name_out, size_t name_out_size, char *phone_out, size_t phone_out_size)
+// Extrait les champs 'name'/'phone'/'pin' du corps JSON de la requête ; renvoie false et une erreur HTTP si invalide
+static bool parse_contact_body(httpd_req_t *req, char *name_out, size_t name_out_size, char *phone_out, size_t phone_out_size,
+                                char *pin_out, size_t pin_out_size)
 {
     char buf[128] = {0};
     if (req->content_len == 0 || req->content_len >= sizeof(buf)) {
@@ -321,6 +332,17 @@ static bool parse_contact_body(httpd_req_t *req, char *name_out, size_t name_out
         return false;
     }
 
+    cJSON *pin = cJSON_GetObjectItem(root, "pin");
+    if (cJSON_IsString(pin) && pin->valuestring[0] != '\0') {
+        strlcpy(pin_out, pin->valuestring, pin_out_size);
+    } else if (pin != NULL && !cJSON_IsNull(pin)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Champ 'pin' doit être une chaîne ou null");
+        cJSON_Delete(root);
+        return false;
+    } else {
+        pin_out[0] = '\0';
+    }
+
     strlcpy(name_out, name->valuestring, name_out_size);
     strlcpy(phone_out, phone->valuestring, phone_out_size);
     cJSON_Delete(root);
@@ -329,7 +351,7 @@ static bool parse_contact_body(httpd_req_t *req, char *name_out, size_t name_out
 
 /**
  * POST /api/v1/contacts
- * Corps attendu (JSON) : {"name": "...", "phone": "+33..."}
+ * Corps attendu (JSON) : {"name": "...", "phone": "+33...", "pin": "1234"|null}
  */
 static esp_err_t contacts_create_post_handler(httpd_req_t *req)
 {
@@ -340,14 +362,18 @@ static esp_err_t contacts_create_post_handler(httpd_req_t *req)
 
     char name[CONTACTS_NAME_MAX_LEN] = {0};
     char phone[CONTACTS_PHONE_MAX_LEN] = {0};
-    if (!parse_contact_body(req, name, sizeof(name), phone, sizeof(phone))) {
+    char pin[CONTACTS_PIN_MAX_LEN] = {0};
+    if (!parse_contact_body(req, name, sizeof(name), phone, sizeof(phone), pin, sizeof(pin))) {
         return ESP_FAIL;
     }
 
     int new_id = -1;
-    esp_err_t err = contacts_add(name, phone, &new_id);
+    esp_err_t err = contacts_add(name, phone, pin, &new_id);
     if (err == ESP_ERR_NO_MEM) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Nombre maximum de contacts atteint (5)");
+        return ESP_FAIL;
+    } else if (err == ESP_ERR_INVALID_ARG) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Nom, téléphone ou code PIN invalide (PIN : 4 à 6 chiffres)");
         return ESP_FAIL;
     } else if (err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Échec de l'ajout du contact");
@@ -363,7 +389,7 @@ static esp_err_t contacts_create_post_handler(httpd_req_t *req)
 
 /**
  * PUT /api/v1/contacts?id=X
- * Corps attendu (JSON) : {"name": "...", "phone": "+33..."}
+ * Corps attendu (JSON) : {"name": "...", "phone": "+33...", "pin": "1234"|null}
  */
 static esp_err_t contacts_update_put_handler(httpd_req_t *req)
 {
@@ -384,13 +410,17 @@ static esp_err_t contacts_update_put_handler(httpd_req_t *req)
 
     char name[CONTACTS_NAME_MAX_LEN] = {0};
     char phone[CONTACTS_PHONE_MAX_LEN] = {0};
-    if (!parse_contact_body(req, name, sizeof(name), phone, sizeof(phone))) {
+    char pin[CONTACTS_PIN_MAX_LEN] = {0};
+    if (!parse_contact_body(req, name, sizeof(name), phone, sizeof(phone), pin, sizeof(pin))) {
         return ESP_FAIL;
     }
 
-    esp_err_t err = contacts_update(id, name, phone);
+    esp_err_t err = contacts_update(id, name, phone, pin);
     if (err == ESP_ERR_NOT_FOUND) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Contact introuvable");
+        return ESP_FAIL;
+    } else if (err == ESP_ERR_INVALID_ARG) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Nom, téléphone ou code PIN invalide (PIN : 4 à 6 chiffres)");
         return ESP_FAIL;
     } else if (err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Échec de la mise à jour du contact");
@@ -428,6 +458,111 @@ static esp_err_t contacts_delete_handler(httpd_req_t *req)
         return ESP_FAIL;
     } else if (err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Échec de la suppression du contact");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"success\"}");
+    return ESP_OK;
+}
+
+/**
+ * GET /api/meian
+ * Retourne la configuration courante de la centrale Meian (pas de protection)
+ */
+static esp_err_t meian_get_handler(httpd_req_t *req)
+{
+    if (!authenticate_request(req)) {
+        return ESP_FAIL;
+    }
+    add_cors_header(req);
+
+    char *json = meian_config_to_json();
+    if (json == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur d'allocation JSON");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json);
+    free(json);
+    return ESP_OK;
+}
+
+/**
+ * POST /api/meian
+ * Corps attendu (JSON) : {"enabled": bool, "ip": "192.168.1.99"|null, "user": "admin"|null, "password": "secret"|null}
+ * L'IP, le user et le password sont obligatoires si enabled=true ; ils peuvent être absents/null si enabled=false
+ */
+static esp_err_t meian_set_handler(httpd_req_t *req)
+{
+    if (!authenticate_request(req)) {
+        return ESP_FAIL;
+    }
+    add_cors_header(req);
+
+    char buf[256] = {0};
+    if (req->content_len == 0 || req->content_len >= sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Payload invalide");
+        return ESP_FAIL;
+    }
+    int received = httpd_req_recv(req, buf, req->content_len);
+    if (received <= 0) {
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "JSON invalide");
+        return ESP_FAIL;
+    }
+
+    cJSON *enabled_item = cJSON_GetObjectItem(root, "enabled");
+    if (!cJSON_IsBool(enabled_item)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Champ 'enabled' (bool) requis");
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+    bool enabled = cJSON_IsTrue(enabled_item);
+
+    const char *ip = NULL;
+    cJSON *ip_item = cJSON_GetObjectItem(root, "ip");
+    if (cJSON_IsString(ip_item) && ip_item->valuestring[0] != '\0') {
+        ip = ip_item->valuestring;
+    } else if (ip_item != NULL && !cJSON_IsNull(ip_item)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Champ 'ip' doit être une chaîne ou null");
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+
+    const char *user = NULL;
+    cJSON *user_item = cJSON_GetObjectItem(root, "user");
+    if (cJSON_IsString(user_item) && user_item->valuestring[0] != '\0') {
+        user = user_item->valuestring;
+    } else if (user_item != NULL && !cJSON_IsNull(user_item)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Champ 'user' doit être une chaîne ou null");
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+
+    const char *password = NULL;
+    cJSON *password_item = cJSON_GetObjectItem(root, "password");
+    if (cJSON_IsString(password_item) && password_item->valuestring[0] != '\0') {
+        password = password_item->valuestring;
+    } else if (password_item != NULL && !cJSON_IsNull(password_item)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Champ 'password' doit être une chaîne ou null");
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = meian_config_set(enabled, ip, user, password);
+    cJSON_Delete(root);
+
+    if (err == ESP_ERR_INVALID_ARG) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "IP, user et password requis et valides (obligatoires si enabled=true)");
+        return ESP_FAIL;
+    } else if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Échec de l'enregistrement de la configuration");
         return ESP_FAIL;
     }
 
@@ -654,6 +789,23 @@ esp_err_t start_rest_server(void)
         .user_ctx = NULL
     };
     httpd_register_uri_handler(server, &contacts_delete_uri);
+
+    /* Configuration de la centrale Meian (lecture publique, écriture protégée) */
+    httpd_uri_t meian_get_uri = {
+        .uri      = "/api/meian",
+        .method   = HTTP_GET,
+        .handler  = meian_get_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &meian_get_uri);
+
+    httpd_uri_t meian_set_uri = {
+        .uri      = "/api/meian",
+        .method   = HTTP_POST,
+        .handler  = meian_set_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &meian_set_uri);
 
     return ESP_OK;
 }

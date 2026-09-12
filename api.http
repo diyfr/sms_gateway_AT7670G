@@ -1,5 +1,7 @@
 ### Variables
-@host = 192.168.0.80
+@host = {{$dotenv HOST}}
+@meian = {{$dotenv MEIAN_HOST}}
+@meian_secret = {{$dotenv MEIAN_SECRET}}
 @apKey = {{$dotenv API_KEY}}
 
 @targetNumber = {{$dotenv TARGET_NUMBER}}
@@ -19,7 +21,7 @@ GET http://{{host}}/api/v1/system/info
 ### manufacturer, model, revision, imei)
 GET http://{{host}}/api/v1/board/status
 
-### Liste des contacts enregistrés
+### Liste des contacts enregistrés (le champ "pin" n'est inclus que si x-api-key est fournie et valide)
 GET http://{{host}}/api/v1/contacts
 
 ### =========================================================
@@ -52,29 +54,57 @@ x-api-key: {{apKey}}
 POST http://{{host}}/api/v1/system/reboot
 x-api-key: {{apKey}}
 
-### Ajouter un contact (5 maximum)
+### Ajouter un contact (5 maximum), avec code PIN optionnel (4 à 6 chiffres)
 POST http://{{host}}/api/v1/contacts
 Content-Type: application/json
 x-api-key: {{apKey}}
 
 {
     "name": "diyfr",
-    "phone": "{{targetNumber}}"
+    "phone": "{{targetNumber}}",
+    "pin": "1234"
 }
 
-### Modifier un contact existant
+### Modifier un contact existant (pin: null pour supprimer le code)
 PUT http://{{host}}/api/v1/contacts?id=1
 Content-Type: application/json
 x-api-key: {{apKey}}
 
 {
     "name": "diyfr@github.com",
-    "phone": "{{targetNumber}}"
+    "phone": "{{targetNumber}}",
+    "pin": null
 }
 
 ### Supprimer un contact
 DELETE http://{{host}}/api/v1/contacts?id=2
 x-api-key: {{apKey}}
+
+### Récupérer la configuration de la centrale Meian (enabled + ip + user + has_password + dernier statut Cid)
+GET http://{{host}}/api/meian
+x-api-key: {{apKey}}
+
+### Activer la surveillance Meian avec son adresse IP, user et password
+POST http://{{host}}/api/meian
+Content-Type: application/json
+x-api-key: {{apKey}}
+
+{
+    "enabled": true,
+    "ip": "{{meian}}",
+    "user": "admin",
+    "password": "{{meian_secret}}"
+}
+
+### Désactiver la surveillance Meian (ip peut être omise/null)
+POST http://{{host}}/api/meian
+Content-Type: application/json
+x-api-key: {{apKey}}
+
+{
+    "enabled": false,
+    "ip": null
+}
 
 ### =========================================================
 ### Portail de provisioning WiFi (uniquement quand l'appareil

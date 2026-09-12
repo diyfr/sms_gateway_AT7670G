@@ -5,11 +5,14 @@
 #include "esp_log.h"
 #include "mdns.h"
 #include "lwip/apps/netbiosns.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "wifi_prov.h"
 #include "esp_modem_api.h"
 #include "board.h" // Contient vos signatures de fonctions SMS
 #include "power.h"
 #include "contacts.h"
+#include "meian.h"
 
 
 esp_modem_dce_t *global_modem = NULL;
@@ -43,6 +46,7 @@ void app_main(void)
     power_hold_board_on(); // Doit être fait avant tout le reste pour rester alimenté sur batterie
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(contacts_init());
+    ESP_ERROR_CHECK(meian_config_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     global_modem = initialize_modem();
@@ -59,4 +63,9 @@ void app_main(void)
 
     ESP_ERROR_CHECK(wifi_prov_connect());
     ESP_ERROR_CHECK(start_rest_server());
+
+    meian_sync_alarm_state(); // Synchro ponctuelle si déjà activé ; le canal Push prend le relais ensuite
+
+    xTaskCreate(meian_sms_monitor_task, "meian_sms_task", 4096, NULL, 5, NULL);
+    xTaskCreate(meian_push_monitor_task, "meian_push_task", 4096, NULL, 5, NULL);
 }

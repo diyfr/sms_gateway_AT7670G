@@ -58,9 +58,51 @@ esp_modem_dce_t* initialize_modem(void) {
  * @brief 1. ENVOYER UN SMS
  * @param dce Le pointeur vers l'instance du modem initialisé
  */
+// Translittère les caractères accentués UTF-8 courants (é, à, ç, ...) en ASCII : le modem envoie les
+// SMS en jeu de caractères GSM/IRA et interprète mal les séquences UTF-8 multi-octets (ex: é -> "C)")
+static void sms_utf8_to_ascii(const char *in, char *out, size_t out_size)
+{
+    size_t o = 0;
+    for (size_t i = 0; in[i] != '\0' && o + 1 < out_size; ) {
+        unsigned char c = (unsigned char)in[i];
+        if (c < 0x80) {
+            out[o++] = (char)c;
+            i++;
+        } else if ((c & 0xE0) == 0xC0 && in[i + 1] != '\0') {
+            unsigned int codepoint = ((c & 0x1F) << 6) | ((unsigned char)in[i + 1] & 0x3F);
+            char replacement;
+            switch (codepoint) {
+                case 0xE0: case 0xE1: case 0xE2: case 0xE3: replacement = 'a'; break; // à á â ã
+                case 0xC0: case 0xC1: case 0xC2: case 0xC3: replacement = 'A'; break;
+                case 0xE8: case 0xE9: case 0xEA: case 0xEB: replacement = 'e'; break; // è é ê ë
+                case 0xC8: case 0xC9: case 0xCA: case 0xCB: replacement = 'E'; break;
+                case 0xEC: case 0xED: case 0xEE: case 0xEF: replacement = 'i'; break; // ì í î ï
+                case 0xF2: case 0xF3: case 0xF4: case 0xF5: replacement = 'o'; break; // ò ó ô õ
+                case 0xF9: case 0xFA: case 0xFB: case 0xFC: replacement = 'u'; break; // ù ú û ü
+                case 0xE7: replacement = 'c'; break; // ç
+                case 0xC7: replacement = 'C'; break;
+                case 0xF1: replacement = 'n'; break; // ñ
+                default:   replacement = '?'; break;
+            }
+            out[o++] = replacement;
+            i += 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            i += 3; // Séquence 3 octets (ex: guillemets typographiques, emoji BMP) : non supportée, ignorée
+        } else if ((c & 0xF8) == 0xF0) {
+            i += 4; // Séquence 4 octets (ex: emoji hors BMP) : non supportée, ignorée
+        } else {
+            i++; // Octet de continuation isolé/invalide
+        }
+    }
+    out[o] = '\0';
+}
+
 esp_err_t board_send_sms(esp_modem_dce_t *dce, const char *phone_number, const char *message) {
     ESP_LOGI(TAG, "Envoi d'un SMS à %s...", phone_number);
-    
+
+    char ascii_message[256];
+    sms_utf8_to_ascii(message, ascii_message, sizeof(ascii_message));
+
     // Configuration obligatoire : Mode Texte et Jeu de caractères GSM standard
     if (esp_modem_sms_txt_mode(dce, true) != ESP_OK || 
         esp_modem_sms_character_set(dce) != ESP_OK) {
@@ -69,7 +111,7 @@ esp_err_t board_send_sms(esp_modem_dce_t *dce, const char *phone_number, const c
     }
 
     // Utilisation de la fonction native de esp_modem
-    esp_err_t err = esp_modem_send_sms(dce, phone_number, message);
+    esp_err_t err = esp_modem_send_sms(dce, phone_number, ascii_message);
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "SMS envoyé avec succès !");
     } else {
@@ -235,6 +277,108 @@ char* board_list_sms_json(esp_modem_dce_t *dce) {
     char *json_str = cJSON_PrintUnformatted(arr);
     cJSON_Delete(arr);
     return json_str;
+}
+
+// Construit un tableau JSON à partir d'une réponse brute multi-messages AT+CMGL
+static cJSON* parse_cmgl_response(const char *raw)
+{
+    cJSON *arr = cJSON_CreateArray();
+    if (arr == NULL) {
+        return NULL;
+    }
+
+    const char *marker = "+CMGL:";
+    const char *rec = strstr(raw, marker);
+    while (rec != NULL) {
+        const char *header_start = rec + strlen(marker);
+        while (*header_start == ' ') {
+            header_start++;
+        }
+        const char *line_end = strchr(header_start, '\n');
+        if (line_end == NULL) {
+            break;
+        }
+
+        char header_buf[128] = {0};
+        size_t hlen = (size_t)(line_end - header_start);
+        if (hlen >= sizeof(header_buf)) {
+            hlen = sizeof(header_buf) - 1;
+        }
+        memcpy(header_buf, header_start, hlen);
+
+        // Format AT+CMGL (mode texte) : +CMGL: <index>,"<status>","<sender>","<alpha>","<timestamp>"
+        const char *p = header_buf;
+        int index = atoi(p);
+        char status[24] = {0}, sender[32] = {0}, alpha[32] = {0}, timestamp[32] = {0};
+        skip_to_next_field(&p); // Passe l'index (non entre guillemets)
+        extract_quoted_field(&p, status, sizeof(status));
+        skip_to_next_field(&p);
+        extract_quoted_field(&p, sender, sizeof(sender));
+        skip_to_next_field(&p);
+        extract_quoted_field(&p, alpha, sizeof(alpha));
+        skip_to_next_field(&p);
+        extract_quoted_field(&p, timestamp, sizeof(timestamp));
+
+        // Le texte du message s'étend jusqu'au prochain "+CMGL:" ou à la fin de la réponse
+        const char *text_start = line_end + 1;
+        const char *next_rec = strstr(text_start, marker);
+        size_t tlen = next_rec ? (size_t)(next_rec - text_start) : strlen(text_start);
+
+        char text[2048] = {0};
+        if (tlen >= sizeof(text)) {
+            tlen = sizeof(text) - 1;
+        }
+        memcpy(text, text_start, tlen);
+        strip_trailing_ok(text);
+
+        cJSON *msg = cJSON_CreateObject();
+        cJSON_AddNumberToObject(msg, "index", index);
+        cJSON_AddStringToObject(msg, "status", status);
+        cJSON_AddStringToObject(msg, "sender", sender);
+        cJSON_AddStringToObject(msg, "timestamp", timestamp);
+        cJSON_AddStringToObject(msg, "text", text);
+        cJSON_AddItemToArray(arr, msg);
+
+        rec = next_rec;
+    }
+
+    return arr;
+}
+
+/**
+ * @brief Liste uniquement les SMS non lus (AT+CMGL="REC UNREAD"). Contrairement à AT+CMGR,
+ *        AT+CMGL ne modifie pas le statut de lecture des messages : un SMS laissé de côté ici
+ *        reste "non lu" et reste visible tel quel via /api/v1/sms/list ou l'application mobile.
+ * @return char* Tableau JSON alloué (à libérer avec free()), ou NULL en cas d'échec
+ */
+char* board_list_unread_sms_json(esp_modem_dce_t *dce) {
+    char *raw = malloc(4096); // Réponse potentiellement volumineuse si plusieurs SMS sont en attente
+    if (raw == NULL) {
+        return NULL;
+    }
+    memset(raw, 0, 4096);
+
+    if (esp_modem_at_raw(dce, "AT+CMGL=\"REC UNREAD\"\r\n", raw, "OK", "ERROR", 5000) != ESP_OK) {
+        free(raw);
+        return NULL;
+    }
+
+    cJSON *arr = parse_cmgl_response(raw);
+    free(raw);
+    if (arr == NULL) {
+        return NULL;
+    }
+
+    char *json_str = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    return json_str;
+}
+
+/**
+ * @brief Marque un SMS comme lu sans exploiter son contenu (AT+CMGR change son statut en le lisant)
+ */
+esp_err_t board_mark_sms_read(esp_modem_dce_t *dce, int index) {
+    return board_read_sms(dce, index, NULL, 0);
 }
 
 /**

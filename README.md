@@ -1,6 +1,6 @@
 # A7670G SMS Gateway
 
-Passerelle SMS basée sur ESP32 + modem cellulaire A7670G (compatible SIM7600), exposant une API REST pour envoyer, lire, lister et supprimer des SMS, consulter l'état du modem/de la carte (dont batterie/solaire), et gérer un carnet de contacts.
+Passerelle SMS basée sur ESP32 + modem cellulaire A7670G (compatible SIM7600), exposant une API REST pour envoyer, lire, lister et supprimer des SMS, consulter l'état du modem/de la carte (dont batterie/solaire), gérer un carnet de contacts et piloter une centrale d'alarme Meian (IP + commandes SMS).
 
 ## Matériel
 
@@ -20,7 +20,10 @@ Carte type **LilyGo T-A7670G** (ESP32 + modem A7670G) :
 
 - **Provisioning WiFi** : au premier démarrage (ou si les identifiants enregistrés ne fonctionnent plus), l'appareil ouvre un point d'accès WiFi `ESP32-Setup` avec un formulaire web (`http://192.168.4.1/`) pour saisir le SSID/mot de passe du réseau. Les identifiants sont sauvegardés en NVS et l'appareil redémarre pour s'y connecter.
 - **Envoi / lecture / liste / suppression de SMS** via des commandes AT (mode texte). La liste et la lecture retournent du JSON structuré (id, statut, expéditeur, horodatage, texte), obtenu en interrogeant chaque emplacement SIM individuellement (`AT+CMGR`) plutôt qu'en parsant la réponse multi-lignes `AT+CMGL`.
-- **Carnet de contacts** (5 maximum) : CRUD persisté en NVS, liste visible sur le tableau de bord.
+- **Carnet de contacts** (5 maximum) : CRUD persisté en NVS, liste visible sur le tableau de bord. Chaque contact peut avoir un code PIN optionnel (4 à 6 chiffres) utilisé pour autoriser les commandes SMS de l'alarme Meian ; ce code n'est renvoyé par `GET /contacts` que si une clé API valide est fournie (masqué pour les clients anonymes qui consultent le tableau de bord).
+- **Intégration alarme Meian [DRAFT]** (`meian.c`/`.h`) : configuration (activation + adresse IP de la centrale) via `/api/meian`, persistée en NVS.
+  - Lorsque activée, une tâche interroge périodiquement la centrale (TCP, protocole propriétaire chiffré XOR) et envoie un SMS à tous les contacts disposant d'un code PIN dès que l'état (désarmée / armée totale / armée périmétrique / déclenchée) change.
+  - Une seconde tâche surveille les **SMS non lus** (`AT+CMGL="REC UNREAD"`, sans en modifier le statut) à la recherche de commandes au format `#PWD<pin>#<CMD>` (`CMD` = `ARM`, `DISARM` ou `CHECK`) ; la commande n'est exécutée que si l'expéditeur correspond à un contact dont le code PIN correspond. Le SMS de commande est ensuite marqué comme lu (jamais supprimé) pour éviter qu'il soit rejoué, sans toucher aux autres SMS.
 - **Alerte SMS batterie/secteur** : toutes les minutes, la tension batterie est classée en 3 niveaux, et un SMS est envoyé à tous les contacts uniquement lors d'un changement de niveau :
   - ≥ 4000 mV → **secteur** ("Gateway sur secteur")
   - [3700, 3900) mV → **sur batterie** ("Gateway sur batterie")
@@ -45,7 +48,7 @@ Toutes les routes commencent par `/api/v1`. Le détail complet avec exemples de 
 | GET | `/` | Tableau de bord HTML embarqué |
 | GET | `/system/info` | Infos système (chip, version IDF, version app, tensions batterie/solaire...) |
 | GET | `/board/status` | État du modem (signal, réseau, SMS en attente, SMSC, identité...) |
-| GET | `/contacts` | Liste des contacts enregistrés |
+| GET | `/contacts` | Liste des contacts enregistrés (champ `pin` inclus uniquement si `X-API-Key` valide) |
 
 ### Protégées (en-tête `X-API-Key` requis)
 
@@ -56,9 +59,16 @@ Toutes les routes commencent par `/api/v1`. Le détail complet avec exemples de 
 | GET | `/sms/read?index=N` | Lire un SMS précis (objet JSON structuré) |
 | DELETE | `/sms/delete?index=N` | Supprimer un SMS précis |
 | POST | `/system/reboot` | Redémarrer l'appareil |
-| POST | `/contacts` | Ajouter un contact (`{"name": "...", "phone": "..."}`, 5 max) |
-| PUT | `/contacts?id=N` | Modifier un contact |
+| POST | `/contacts` | Ajouter un contact (`{"name": "...", "phone": "...", "pin": "1234"}`, `pin` optionnel, 5 max) |
+| PUT | `/contacts?id=N` | Modifier un contact (`pin: null` pour retirer le code) |
 | DELETE | `/contacts?id=N` | Supprimer un contact |
+
+En dehors de `/api/v1`, deux routes protégées pilotent la configuration Meian :
+
+| Méthode | Route | Description |
+|---|---|---|
+| GET | `/api/meian` | Configuration courante (`{"enabled": bool, "ip": string\|null}`) |
+| POST | `/api/meian` | Définit `enabled`/`ip` (`ip` obligatoire si `enabled=true`) |
 
 ## Configuration
 
@@ -82,12 +92,25 @@ idf.py -p <PORT> flash monitor
 
 ```
 main/
-  main.c          # Point d'entrée, init NVS/WiFi/mDNS, démarrage du serveur REST
+  main.c          # Point d'entrée, init NVS/WiFi/mDNS, démarrage du serveur REST et des tâches Meian
   board.c/.h      # Pilotage du modem SIMCom (AT commands), parsing des réponses
   power.c/.h      # Alimentation carte (BOARD_POWERON_PIN), lecture batterie/solaire (ADC) et alerte SMS batterie/secteur
-  contacts.c/.h   # CRUD du carnet de contacts, persisté en NVS
+  contacts.c/.h   # CRUD du carnet de contacts (dont code PIN optionnel), persisté en NVS
+  meian.c/.h      # Configuration + pilotage de la centrale d'alarme Meian, commandes SMS, notifications de changement d'état
   wifi_prov.c/.h  # Provisioning WiFi (SoftAP + portail de configuration)
-  rest_server.c   # Serveur HTTP et endpoints /api/v1/*
+  rest_server.c   # Serveur HTTP et endpoints /api/v1/* et /api/meian
 partitions_example.csv  # Table de partitions (nvs, phy_init, factory)
 api.http          # Requêtes de test (extension VS Code REST Client)
+```
+
+
+## Utilisation [api.http](api.http)
+A utiliser avec le plugin [Rest-Client](https://marketplace.visualstudio.com/items?itemName=humao.rest-client)  
+
+Définissez vos variables d'environnement dans un fichier `.env`  
+```config
+API_KEY=XXXXXXXXXXXX
+TARGET_NUMBER=+33651000000
+MEIAN_HOST=192.168.XXX.XXX
+HOST=192.168.XXX.XXX
 ```

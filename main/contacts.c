@@ -11,6 +11,8 @@ typedef struct {
     int id;
     char name[CONTACTS_NAME_MAX_LEN];
     char phone[CONTACTS_PHONE_MAX_LEN];
+    bool has_pin;
+    char pin[CONTACTS_PIN_MAX_LEN];
 } contact_entry_t;
 
 typedef struct {
@@ -56,7 +58,7 @@ esp_err_t contacts_init(void)
     return ESP_OK;
 }
 
-char* contacts_list_json(void)
+char* contacts_list_json(bool include_pin)
 {
     cJSON *arr = cJSON_CreateArray();
     if (arr == NULL) {
@@ -71,6 +73,13 @@ char* contacts_list_json(void)
         cJSON_AddNumberToObject(item, "id", s_store.entries[i].id);
         cJSON_AddStringToObject(item, "name", s_store.entries[i].name);
         cJSON_AddStringToObject(item, "phone", s_store.entries[i].phone);
+        if (include_pin) {
+            if (s_store.entries[i].has_pin) {
+                cJSON_AddStringToObject(item, "pin", s_store.entries[i].pin);
+            } else {
+                cJSON_AddNullToObject(item, "pin");
+            }
+        }
         cJSON_AddItemToArray(arr, item);
     }
 
@@ -89,15 +98,36 @@ int contacts_get_all(contact_info_t *out, int max_count)
         out[count].id = s_store.entries[i].id;
         strlcpy(out[count].name, s_store.entries[i].name, sizeof(out[count].name));
         strlcpy(out[count].phone, s_store.entries[i].phone, sizeof(out[count].phone));
+        out[count].has_pin = s_store.entries[i].has_pin;
+        strlcpy(out[count].pin, s_store.entries[i].pin, sizeof(out[count].pin));
         count++;
     }
     return count;
 }
 
-esp_err_t contacts_add(const char *name, const char *phone, int *out_id)
+// Vérifie que pin est soit vide/NULL (aucun code), soit une suite de 4 à 6 chiffres
+static bool is_valid_pin(const char *pin)
+{
+    if (pin == NULL || pin[0] == '\0') {
+        return true;
+    }
+    size_t len = strlen(pin);
+    if (len < 4 || len > 6) {
+        return false;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (pin[i] < '0' || pin[i] > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+esp_err_t contacts_add(const char *name, const char *phone, const char *pin, int *out_id)
 {
     if (name == NULL || phone == NULL || name[0] == '\0' || phone[0] == '\0' ||
-        strlen(name) >= CONTACTS_NAME_MAX_LEN || strlen(phone) >= CONTACTS_PHONE_MAX_LEN) {
+        strlen(name) >= CONTACTS_NAME_MAX_LEN || strlen(phone) >= CONTACTS_PHONE_MAX_LEN ||
+        !is_valid_pin(pin)) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -116,6 +146,13 @@ esp_err_t contacts_add(const char *name, const char *phone, int *out_id)
     s_store.entries[free_slot].id = s_store.next_id++;
     strlcpy(s_store.entries[free_slot].name, name, sizeof(s_store.entries[free_slot].name));
     strlcpy(s_store.entries[free_slot].phone, phone, sizeof(s_store.entries[free_slot].phone));
+    if (pin != NULL && pin[0] != '\0') {
+        s_store.entries[free_slot].has_pin = true;
+        strlcpy(s_store.entries[free_slot].pin, pin, sizeof(s_store.entries[free_slot].pin));
+    } else {
+        s_store.entries[free_slot].has_pin = false;
+        s_store.entries[free_slot].pin[0] = '\0';
+    }
 
     if (out_id != NULL) {
         *out_id = s_store.entries[free_slot].id;
@@ -123,10 +160,11 @@ esp_err_t contacts_add(const char *name, const char *phone, int *out_id)
     return contacts_save();
 }
 
-esp_err_t contacts_update(int id, const char *name, const char *phone)
+esp_err_t contacts_update(int id, const char *name, const char *phone, const char *pin)
 {
     if (name == NULL || phone == NULL || name[0] == '\0' || phone[0] == '\0' ||
-        strlen(name) >= CONTACTS_NAME_MAX_LEN || strlen(phone) >= CONTACTS_PHONE_MAX_LEN) {
+        strlen(name) >= CONTACTS_NAME_MAX_LEN || strlen(phone) >= CONTACTS_PHONE_MAX_LEN ||
+        !is_valid_pin(pin)) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -134,6 +172,13 @@ esp_err_t contacts_update(int id, const char *name, const char *phone)
         if (s_store.entries[i].used && s_store.entries[i].id == id) {
             strlcpy(s_store.entries[i].name, name, sizeof(s_store.entries[i].name));
             strlcpy(s_store.entries[i].phone, phone, sizeof(s_store.entries[i].phone));
+            if (pin != NULL && pin[0] != '\0') {
+                s_store.entries[i].has_pin = true;
+                strlcpy(s_store.entries[i].pin, pin, sizeof(s_store.entries[i].pin));
+            } else {
+                s_store.entries[i].has_pin = false;
+                s_store.entries[i].pin[0] = '\0';
+            }
             return contacts_save();
         }
     }
