@@ -278,6 +278,33 @@ static esp_err_t sms_delete_handler(httpd_req_t *req) {
     }
 }
 
+/**
+ * 5. DELETE /api/v1/sms/clear
+ * Supprime tous les SMS stockés sur la SIM (lus, envoyés et non lus)
+ */
+static esp_err_t sms_clear_handler(httpd_req_t *req) {
+    if (!authenticate_request(req)) {
+        return ESP_FAIL;
+    }
+    add_cors_header(req);
+
+    if (global_modem == NULL) {
+        httpd_resp_send_err(req, HTTPD_503_SERVICE_UNAVAILABLE, "Modem déconnecté");
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = board_delete_all_sms(global_modem);
+
+    if (err == ESP_OK) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"success\",\"message\":\"Tous les SMS ont été supprimés\"}");
+        return ESP_OK;
+    } else {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Échec de la suppression");
+        return ESP_FAIL;
+    }
+}
+
 
 
 static const char *TAG = "esp-rest";
@@ -571,6 +598,27 @@ static esp_err_t meian_set_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/**
+ * GET /api/v1/meian/status
+ * Statut public minimal de l'alarme Meian (pas de protection, pas d'IP/identifiants exposés) :
+ * {"enabled": bool, "status_label": string|null}
+ */
+static esp_err_t meian_status_get_handler(httpd_req_t *req)
+{
+    add_cors_header(req);
+
+    char *json = meian_status_to_json();
+    if (json == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur d'allocation JSON");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json);
+    free(json);
+    return ESP_OK;
+}
+
 /* Page d'accueil minimale embarquée dans le firmware */
 static const char INDEX_HTML[] =
     "<!DOCTYPE html><html><head><meta charset='utf-8'>"
@@ -581,6 +629,7 @@ static const char INDEX_HTML[] =
     "<h1>ESP A7670G Dashboard</h1>"
     "<h2>Système</h2><table id='system'></table>"
     "<h2>Modem / Board</h2><table id='board'></table>"
+    "<h2>Alarme Meian</h2><table id='meian'></table>"
     "<h2>Contacts</h2><table id='contacts'></table>"
     "<script>"
     "function fillTable(id, data) {"
@@ -610,6 +659,13 @@ static const char INDEX_HTML[] =
     "  try {"
     "    const board = await (await fetch('/api/v1/board/status')).json();"
     "    fillTable('board', board);"
+    "  } catch (e) { console.error(e); }"
+    "  try {"
+    "    const meian = await (await fetch('/api/v1/meian/status')).json();"
+    "    fillTable('meian', {"
+    "      'Activée': meian.enabled ? 'Oui' : 'Non',"
+    "      'Statut': meian.enabled ? (meian.status_label || 'Inconnu') : '-'"
+    "    });"
     "  } catch (e) { console.error(e); }"
     "  try {"
     "    const contacts = await (await fetch('/api/v1/contacts')).json();"
@@ -702,6 +758,15 @@ esp_err_t start_rest_server(void)
     };
     httpd_register_uri_handler(server, &board_status_get_uri);
 
+    /* Statut public de l'alarme Meian (enabled + status_label), sans protection */
+    httpd_uri_t meian_status_get_uri = {
+        .uri = "/api/v1/meian/status",
+        .method = HTTP_GET,
+        .handler = meian_status_get_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &meian_status_get_uri);
+
 
       /* 1. Route pour l'envoi de SMS (POST) */
     httpd_uri_t sms_send_uri = {
@@ -738,6 +803,15 @@ esp_err_t start_rest_server(void)
         .user_ctx = NULL
     };
     httpd_register_uri_handler(server, &sms_delete_uri);
+
+    /* 5. Route pour supprimer tous les SMS (DELETE) */
+    httpd_uri_t sms_clear_uri = {
+        .uri      = "/api/v1/sms/clear",
+        .method   = HTTP_DELETE,
+        .handler  = sms_clear_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &sms_clear_uri);
 
     /* URI handler for fetching system info */
     httpd_uri_t system_info_get_uri = {

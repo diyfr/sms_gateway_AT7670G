@@ -452,6 +452,23 @@ esp_err_t board_delete_sms(esp_modem_dce_t *dce, int index) {
     return err;
 }
 
+/**
+ * @brief Supprime TOUS les SMS de la SIM (AT+CMGD=1,4 : delflag=4 = tous les messages, quel que soit leur statut)
+ */
+esp_err_t board_delete_all_sms(esp_modem_dce_t *dce) {
+    ESP_LOGI(TAG, "Suppression de tous les SMS...");
+
+    char response_buffer[2048] = {0};
+    esp_err_t err = esp_modem_at_raw(dce, "AT+CMGD=1,4\r\n", response_buffer, "OK", "ERROR", 5000);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Tous les SMS ont été supprimés.");
+    } else {
+        ESP_LOGE(TAG, "Échec de la suppression de tous les SMS");
+    }
+    return err;
+}
+
 
 // Traduit le <stat> de AT+CNSMOD? en libellé lisible (2G/3G/4G)
 static const char* network_type_label(int stat)

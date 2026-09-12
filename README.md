@@ -21,9 +21,9 @@ Carte type **LilyGo T-A7670G** (ESP32 + modem A7670G) :
 - **Provisioning WiFi** : au premier démarrage (ou si les identifiants enregistrés ne fonctionnent plus), l'appareil ouvre un point d'accès WiFi `ESP32-Setup` avec un formulaire web (`http://192.168.4.1/`) pour saisir le SSID/mot de passe du réseau. Les identifiants sont sauvegardés en NVS et l'appareil redémarre pour s'y connecter.
 - **Envoi / lecture / liste / suppression de SMS** via des commandes AT (mode texte). La liste et la lecture retournent du JSON structuré (id, statut, expéditeur, horodatage, texte), obtenu en interrogeant chaque emplacement SIM individuellement (`AT+CMGR`) plutôt qu'en parsant la réponse multi-lignes `AT+CMGL`.
 - **Carnet de contacts** (5 maximum) : CRUD persisté en NVS, liste visible sur le tableau de bord. Chaque contact peut avoir un code PIN optionnel (4 à 6 chiffres) utilisé pour autoriser les commandes SMS de l'alarme Meian ; ce code n'est renvoyé par `GET /contacts` que si une clé API valide est fournie (masqué pour les clients anonymes qui consultent le tableau de bord).
-- **Intégration alarme Meian [DRAFT]** (`meian.c`/`.h`) : configuration (activation + adresse IP de la centrale) via `/api/meian`, persistée en NVS.
-  - Lorsque activée, une tâche interroge périodiquement la centrale (TCP, protocole propriétaire chiffré XOR) et envoie un SMS à tous les contacts disposant d'un code PIN dès que l'état (désarmée / armée totale / armée périmétrique / déclenchée) change.
-  - Une seconde tâche surveille les **SMS non lus** (`AT+CMGL="REC UNREAD"`, sans en modifier le statut) à la recherche de commandes au format `#PWD<pin>#<CMD>` (`CMD` = `ARM`, `DISARM` ou `CHECK`) ; la commande n'est exécutée que si l'expéditeur correspond à un contact dont le code PIN correspond. Le SMS de commande est ensuite marqué comme lu (jamais supprimé) pour éviter qu'il soit rejoué, sans toucher aux autres SMS.
+- **🚧 Intégration alarme Meian 🚧** (`meian.c`/`.h`) : configuration (activation + IP/identifiants de la centrale) via `/api/meian`, persistée en NVS. Protocole propriétaire TCP chiffré XOR (compatible `meian.py`/pyialarm), avec authentification (`Pair/Client`) avant toute commande.
+  - **Canal Push** (`Pair/Push`) : une connexion persistante reste ouverte avec la centrale et reçoit en temps réel les évènements (changement d'état, intrusion, défauts...). Chaque évènement (code *Cid*) est traduit en libellé lisible, envoyé par SMS à tous les contacts enregistrés (dédupliqué par numéro de téléphone), et le dernier code connu est persisté en NVS (visible dans `GET /api/meian` et `GET /api/v1/meian/status`). Certains codes propres à l'installation (ex: `1370`, défaut de boucle structurel) sont ignorés. En cas de reconnexion du canal Push (perte de connexion), une synchronisation `GetAlarmStatus` est effectuée pour rattraper les évènements manqués pendant la coupure.
+  - Une seconde tâche surveille les **SMS non lus** (`AT+CMGL="REC UNREAD"`, sans en modifier le statut) à la recherche de commandes au format `#PWD<pin>#<CMD>` (`CMD` = `ARM`, `DISARM`, `STAY` ou `CHECK`) ; la commande n'est exécutée que si l'expéditeur correspond à un contact dont le code PIN correspond. Le SMS de commande est ensuite marqué comme lu (jamais supprimé) pour éviter qu'il soit rejoué, sans toucher aux autres SMS.
 - **Alerte SMS batterie/secteur** : toutes les minutes, la tension batterie est classée en 3 niveaux, et un SMS est envoyé à tous les contacts uniquement lors d'un changement de niveau :
   - ≥ 4000 mV → **secteur** ("Gateway sur secteur")
   - [3700, 3900) mV → **sur batterie** ("Gateway sur batterie")
@@ -33,13 +33,19 @@ Carte type **LilyGo T-A7670G** (ESP32 + modem A7670G) :
 
   Le niveau est persisté en NVS pour ne pas renvoyer l'alerte après un redémarrage (la bascule secteur/batterie peut provoquer un reset).
 - **Alimentation & énergie** : maintien de la carte sous tension sur batterie (sans USB), lecture des tensions batterie/solaire.
-- **Tableau de bord web** intégré au firmware (`GET /`), affichant en direct les informations système, l'état du modem et les contacts.
+- **Tableau de bord web** intégré au firmware (`GET /`), affichant en direct les informations système, l'état du modem, l'état de l'alarme Meian (activée + statut courant) et les contacts.
 - **API REST** (`/api/v1/*`) protégée par une clé API (`X-API-Key`) pour les actions sensibles, avec mDNS (`<hostname>.local`) pour la découverte sur le réseau local.
 - **Statut détaillé du modem** : signal, enregistrement réseau, type de réseau (2G/3G/4G), SMSC, identité du modem (fabricant, modèle, révision, IMEI).
 
 ## Routes API
 
 Toutes les routes commencent par `/api/v1`. Le détail complet avec exemples de requêtes est disponible dans [api.http](api.http).
+
+## Bugs connus 
+- Pas de gestion de doublons sur les contacts / possible d'écraser l'ID par défaut   
+- Instabilité sur la connexion avec la centrale. certainement lié aux limites de l'ESP sur les interactions sortantes et entrantes  
+- Problème sur la récupération de la liste des SMS dès que l'on en supprime un qui n'est pas le dernier   
+
 
 ### Publiques (aucune protection)
 
@@ -49,6 +55,7 @@ Toutes les routes commencent par `/api/v1`. Le détail complet avec exemples de 
 | GET | `/system/info` | Infos système (chip, version IDF, version app, tensions batterie/solaire...) |
 | GET | `/board/status` | État du modem (signal, réseau, SMS en attente, SMSC, identité...) |
 | GET | `/contacts` | Liste des contacts enregistrés (champ `pin` inclus uniquement si `X-API-Key` valide) |
+| GET | `/meian/status` | Statut public de l'alarme Meian (`{"enabled": bool, "status_label": string\|null}`, sans IP/identifiants) |
 
 ### Protégées (en-tête `X-API-Key` requis)
 
@@ -58,6 +65,7 @@ Toutes les routes commencent par `/api/v1`. Le détail complet avec exemples de 
 | GET | `/sms/list` | Lister les SMS stockés sur la SIM (tableau JSON structuré) |
 | GET | `/sms/read?index=N` | Lire un SMS précis (objet JSON structuré) |
 | DELETE | `/sms/delete?index=N` | Supprimer un SMS précis |
+| DELETE | `/sms/clear` | Supprimer tous les SMS de la SIM |
 | POST | `/system/reboot` | Redémarrer l'appareil |
 | POST | `/contacts` | Ajouter un contact (`{"name": "...", "phone": "...", "pin": "1234"}`, `pin` optionnel, 5 max) |
 | PUT | `/contacts?id=N` | Modifier un contact (`pin: null` pour retirer le code) |
@@ -67,8 +75,8 @@ En dehors de `/api/v1`, deux routes protégées pilotent la configuration Meian 
 
 | Méthode | Route | Description |
 |---|---|---|
-| GET | `/api/meian` | Configuration courante (`{"enabled": bool, "ip": string\|null}`) |
-| POST | `/api/meian` | Définit `enabled`/`ip` (`ip` obligatoire si `enabled=true`) |
+| GET | `/api/meian` | Configuration courante (`{"enabled", "ip", "user", "has_password", "last_status_cid", "last_status_label"}`) |
+| POST | `/api/meian` | Définit `enabled`/`ip`/`user`/`password` (`ip`, `user` et `password` obligatoires si `enabled=true`) |
 
 ## Configuration
 

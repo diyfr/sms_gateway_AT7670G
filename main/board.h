@@ -21,6 +21,7 @@ esp_err_t board_read_sms(esp_modem_dce_t *dce, int index, char *out_buf, size_t 
 char* board_read_sms_json(esp_modem_dce_t *dce, int index); // Objet JSON structuré du SMS (à libérer avec free()), NULL si échec
 esp_err_t board_mark_sms_read(esp_modem_dce_t *dce, int index); // Marque un SMS comme lu sans exploiter son contenu
 esp_err_t board_delete_sms(esp_modem_dce_t *dce, int index);
+esp_err_t board_delete_all_sms(esp_modem_dce_t *dce); // Supprime tous les SMS (lus, envoyés et non lus) de la SIM
 char* board_get_status_json(esp_modem_dce_t *dce); // ⚠️ ATTENTION : Libérer impérativement la mémoire allouée par cJSON
 
 extern esp_modem_dce_t *global_modem;

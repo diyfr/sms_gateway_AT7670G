@@ -4,15 +4,15 @@
 #include <stdbool.h>
 #include "esp_err.h"
 
-void arm(void);
-void disarm(void);
-void perimeter(void);
-int state(void);
+bool arm(void);
+bool disarm(void);
+bool perimeter(void);
+bool state(void);
 
 void meian_xor_cipher(char *data, int len);
 void parse_alarm_status(const char *xml_response);
 void parse_zones_status(char *xml_response);
-void execute_meian_transaction(const char *xml_payload, bool is_zone_query);
+bool execute_meian_transaction(const char *xml_payload, bool is_zone_query);
 
 /**
  * @brief Synchronise une fois l'état de l'alarme (GetAlarmStatus) et notifie les contacts si l'état a
@@ -76,5 +76,12 @@ void meian_config_get(meian_config_t *out);
  * @return char* Chaîne JSON allouée (à libérer avec free()), ou NULL en cas d'échec d'allocation
  */
 char* meian_config_to_json(void);
+
+/**
+ * @brief Sérialise un statut public minimal (sans IP/identifiants), pour affichage sur la page
+ * d'accueil sans authentification : {"enabled":bool,"status_label":string|null}
+ * @return char* Chaîne JSON allouée (à libérer avec free()), ou NULL en cas d'échec d'allocation
+ */
+char* meian_status_to_json(void);
 
 #endif // MEIAN_H_

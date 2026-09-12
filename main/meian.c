@@ -72,6 +72,8 @@ typedef enum {
 static meian_state_t s_current_state = ALARM_STATE_UNKNOWN;
 static meian_state_t s_last_notified_state = ALARM_STATE_UNKNOWN;
 
+static const char* meian_state_label(meian_state_t alarm_state); // Défini plus bas
+
 #define MEIAN_NVS_NAMESPACE "meian"
 #define MEIAN_NVS_KEY       "config"
 #define MEIAN_NVS_LAST_CID_KEY "last_cid"
@@ -232,22 +234,41 @@ char* meian_config_to_json(void)
     return json_str;
 }
 
+// Sérialise un statut public minimal (sans IP/identifiants), destiné à l'affichage sur la page
+// d'accueil sans authentification : {"enabled":bool,"status_label":string|null}
+char* meian_status_to_json(void)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) {
+        return NULL;
+    }
+    cJSON_AddBoolToObject(root, "enabled", s_config.enabled);
+    if (s_config.enabled && s_has_last_cid) {
+        cJSON_AddStringToObject(root, "status_label", meian_cid_label(s_last_cid));
+    } else {
+        cJSON_AddNullToObject(root, "status_label");
+    }
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json_str;
+}
+
 
 /**
  * Arme l'alarme en mode Total (tous les capteurs actifs).
  */
-void arm(void) {
+bool arm(void) {
     ESP_LOGI(TAG, "⚡ Action : Armement Total demandé...");
-    execute_meian_transaction(XML_CMD_ARM_AWAY, false);
+    return execute_meian_transaction(XML_CMD_ARM_AWAY, false);
 }
 
 
 /**
  * Désarme le système et coupe la sirène si elle sonne.
  */
-void disarm(void) {
+bool disarm(void) {
     ESP_LOGI(TAG, "⚡ Action : Désarmement demandé...");
-    execute_meian_transaction(XML_CMD_DISARM, false);
+    return execute_meian_transaction(XML_CMD_DISARM, false);
 }
 
 
@@ -255,29 +276,19 @@ void disarm(void) {
  * Arme l'alarme en mode Périmétrique (uniquement portes et fenêtres).
  * Non utilisée
  */
-void perimeter(void) {
+bool perimeter(void) {
     ESP_LOGI(TAG, "⚡ Action : Armement Périmétrique demandé...");
-    execute_meian_transaction(XML_CMD_ARM_STAY, false);
+    return execute_meian_transaction(XML_CMD_ARM_STAY, false);
 }
 
 
 /**
- * Interroge la centrale pour obtenir son état réseau.
- * @return meian_state_t L'état décodé de la centrale
+ * Interroge la centrale pour obtenir son état courant (commande SMS "CHECK").
+ * @return meian_state_t L'état décodé de la centrale (ALARM_STATE_UNKNOWN si la requête échoue)
  */
-int state(void) {
-    ESP_LOGD(TAG, "Interrogation de la centrale pour mise à jour de l'état...");
-    
-    // (Cette fonction utilise le parseur 'parse_alarm_status' modifié ci-dessous)
-    execute_meian_transaction(XML_REQ_STATUS, false);
-    
-    
-    // Ici, nous simulons la récupération de l'état global.
-    // Pour que le retour de fonction soit dynamique, 'parse_alarm_status' 
-    // doit mettre à jour une variable d'état. 
-    // Par exemple, si parse_alarm_status détecte "ALARM", on retourne ALARM_STATE_TRIGGERED.
-    
-    return 0; // Modifiez selon votre variable d'état interne globale si nécessaire
+bool state(void) {
+    ESP_LOGI(TAG, "Commande CHECK : interrogation de la centrale...");
+    return execute_meian_transaction(XML_REQ_STATUS, false);
 }
 
 
@@ -498,16 +509,16 @@ static bool meian_authenticate(int sock, char *rx_buffer)
 /**
  * Envoie une commande XML à la centrale : s'authentifie (Pair/Client) puis envoie la commande sur la même session
  */
-void execute_meian_transaction(const char *xml_payload, bool is_zone_query) {
+bool execute_meian_transaction(const char *xml_payload, bool is_zone_query) {
     if (!s_config.has_ip || !s_config.has_user || !s_config.has_password) {
         ESP_LOGE(TAG, "Configuration Meian incomplète (IP/identifiants) : transaction annulée.");
-        return;
+        return false;
     }
 
     int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (sock < 0) {
         ESP_LOGE(TAG, "Impossible de créer la socket TCP: errno %d", errno);
-        return;
+        return false;
     }
 
     struct timeval timeout;
@@ -523,22 +534,23 @@ void execute_meian_transaction(const char *xml_payload, bool is_zone_query) {
     if (connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) != 0) {
         ESP_LOGE(TAG, "Échec de connexion à la centrale Meian (%s).", s_config.ip);
         close(sock);
-        return;
+        return false;
     }
 
     char *rx_buffer = malloc(RX_BUFFER_SIZE);
     if (rx_buffer == NULL) {
         ESP_LOGE(TAG, "Échec d'allocation mémoire pour la réception.");
         close(sock);
-        return;
+        return false;
     }
-
+    bool success = false;
     if (meian_authenticate(sock, rx_buffer)) {
         char *xml_response = NULL;
         int xml_len = 0;
         if (meian_send_frame(sock, xml_payload, 2) &&
             meian_recv_frame(sock, rx_buffer, &xml_response, &xml_len)) {
-            if (!meian_response_ok(xml_response)) {
+            success = meian_response_ok(xml_response);
+            if (!success) {
                 ESP_LOGW(TAG, "La centrale a renvoyé un code d'erreur pour cette commande.");
             }
             if (is_zone_query) {
@@ -551,6 +563,7 @@ void execute_meian_transaction(const char *xml_payload, bool is_zone_query) {
 
     free(rx_buffer);
     close(sock);
+    return success;
 }
 
 
@@ -568,17 +581,41 @@ static const char* meian_state_label(meian_state_t alarm_state)
     }
 }
 
+// Envoie un message à tous les contacts enregistrés, en dédupliquant par numéro de téléphone (au cas
+// où un même contact serait enregistré plusieurs fois) pour éviter d'envoyer le même SMS en double
+static void meian_broadcast_sms(const char *message)
+{
+    contact_info_t contacts[CONTACTS_MAX_COUNT];
+    int count = contacts_get_all(contacts, CONTACTS_MAX_COUNT);
+
+    char sent_phones[CONTACTS_MAX_COUNT][CONTACTS_PHONE_MAX_LEN];
+    int sent_count = 0;
+
+    for (int i = 0; i < count; i++) {
+        bool already_sent = false;
+        for (int j = 0; j < sent_count; j++) {
+            if (strcmp(sent_phones[j], contacts[i].phone) == 0) {
+                already_sent = true;
+                break;
+            }
+        }
+        if (already_sent) {
+            continue;
+        }
+        board_send_sms(global_modem, contacts[i].phone, message);
+        if (sent_count < CONTACTS_MAX_COUNT) {
+            strlcpy(sent_phones[sent_count], contacts[i].phone, sizeof(sent_phones[sent_count]));
+            sent_count++;
+        }
+    }
+}
+
 // Envoie un SMS de notification à tous les contacts enregistrés (le PIN ne sert qu'à autoriser les commandes SMS)
 static void meian_notify_contacts_state_change(meian_state_t new_state)
 {
     char message[64];
     snprintf(message, sizeof(message), "Alarme : %s", meian_state_label(new_state));
-
-    contact_info_t contacts[CONTACTS_MAX_COUNT];
-    int count = contacts_get_all(contacts, CONTACTS_MAX_COUNT);
-    for (int i = 0; i < count; i++) {
-        board_send_sms(global_modem, contacts[i].phone, message);
-    }
+    meian_broadcast_sms(message);
 }
 
 // --------------------------------------------------------------------------------------------
@@ -649,6 +686,20 @@ static bool meian_cid_exists(const char *cid)
 {
     for (size_t i = 0; i < MEIAN_CID_TABLE_LEN; i++) {
         if (strcmp(MEIAN_CID_TABLE[i].cid, cid) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Codes Cid propres à cette installation à ne jamais notifier (ex: défaut de boucle structurel connu)
+static const char* MEIAN_CID_IGNORED[] = { "1370", "1351", "3370" };
+#define MEIAN_CID_IGNORED_LEN (sizeof(MEIAN_CID_IGNORED) / sizeof(MEIAN_CID_IGNORED[0]))
+
+static bool meian_cid_is_ignored(const char *cid)
+{
+    for (size_t i = 0; i < MEIAN_CID_IGNORED_LEN; i++) {
+        if (strcmp(MEIAN_CID_IGNORED[i], cid) == 0) {
             return true;
         }
     }
@@ -794,6 +845,11 @@ static void meian_handle_push_event(const char *raw_xml)
         return;
     }
 
+    if (meian_cid_is_ignored(cid)) {
+        ESP_LOGI(TAG, "Évènement Meian [%s] ignoré (structurel à cette installation).", cid);
+        return;
+    }
+
     bool known = meian_cid_exists(cid);
     const char *label = meian_cid_label(cid);
     ESP_LOGW(TAG, "🔔 Évènement Meian [%s] %s (zone %s%s%s) - %s", cid, label,
@@ -812,16 +868,12 @@ static void meian_handle_push_event(const char *raw_xml)
 
     char message[96];
     if (zone_name[0] != '\0') {
-        snprintf(message, sizeof(message), "Alarme Meian : %s (%s)", label, zone_name);
+        snprintf(message, sizeof(message), "Alarme : %s (%s)", label, zone_name);
     } else {
-        snprintf(message, sizeof(message), "Alarme Meian : %s", label);
+        snprintf(message, sizeof(message), "Alarme : %s", label);
     }
 
-    contact_info_t contacts[CONTACTS_MAX_COUNT];
-    int count = contacts_get_all(contacts, CONTACTS_MAX_COUNT);
-    for (int i = 0; i < count; i++) {
-        board_send_sms(global_modem, contacts[i].phone, message);
-    }
+    meian_broadcast_sms(message);
 }
 
 // Envoie la trame d'inscription au canal Push (<Root><Pair><Push>) ; le protocole impose seq=0 ici
@@ -963,6 +1015,7 @@ void meian_push_monitor_task(void *pvParameters) {
                         break;
                     }
                     ESP_LOGI(TAG, "Inscription au canal Push confirmée par la centrale.");
+                    meian_sync_alarm_state(); // Rattrape les évènements manqués pendant la déconnexion
                 } else {
                     meian_handle_push_event(xml_response);
                 }
@@ -1070,18 +1123,46 @@ static bool meian_sender_authorized(const char *sender, const char *pin)
     return false;
 }
 
-static void meian_execute_sms_command(const char *cmd)
+static void meian_execute_sms_command(const char *cmd, const char *sender)
 {
+    bool status_changed = false;
+    bool success = false;
     if (strcmp(cmd, "ARM") == 0) {
-        arm();
+        if (s_current_state != ALARM_STATE_ARMED_AWAY) {
+            status_changed = true;
+        }
+        success = arm();
     } else if (strcmp(cmd, "DISARM") == 0) {
-        disarm();
+        if (s_current_state != ALARM_STATE_DISARMED) {
+            status_changed = true;
+        }
+        success = disarm();
     } else if (strcmp(cmd, "CHECK") == 0) {
-        state();
+        success = state();
     } else if (strcmp(cmd, "STAY") == 0) {
-        perimeter();
+        if (s_current_state != ALARM_STATE_ARMED_STAY) {
+            status_changed = true;
+        }
+        success = perimeter();
     } else {
         ESP_LOGW(TAG, "Commande SMS inconnue : %s", cmd);
+        return;
+    }
+    char message[64];
+    if (!success) {
+        snprintf(message, sizeof(message), "Échec de la commande : %s", cmd);
+        board_send_sms(global_modem, sender, message);
+        return;
+    }
+    if (strcmp(cmd, "CHECK") == 0) {
+        // Confirme par SMS à l'expéditeur l'état résultant de la commande (utile notamment pour CHECK)
+        snprintf(message, sizeof(message), "Alarme : %s", meian_state_label(s_current_state));
+        board_send_sms(global_modem, sender, message);
+    } else if (!status_changed) {
+        // Dans les autres cas il y a un changement de statut via le push de l'alarme sauf si le statut est inchangé
+        // On renotifie l'état actuel de l'alarme par SMS
+        snprintf(message, sizeof(message), "Alarme : %s", meian_state_label(s_current_state));
+        board_send_sms(global_modem, sender, message);
     }
 }
 
@@ -1106,7 +1187,7 @@ static void meian_process_sms_item(cJSON *item)
     const char *sender = sender_item->valuestring;
     if (meian_sender_authorized(sender, pin)) {
         ESP_LOGI(TAG, "Commande SMS '%s' autorisée depuis %s", cmd, sender);
-        meian_execute_sms_command(cmd);
+        meian_execute_sms_command(cmd, sender);
     } else {
         ESP_LOGW(TAG, "Commande SMS refusée depuis %s (expéditeur inconnu ou code PIN invalide)", sender);
     }
