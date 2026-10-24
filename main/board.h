@@ -12,6 +12,7 @@
 #define BOARD_MODEM_DTR         25
 #define BOARD_MODEM_TX          26
 #define BOARD_MODEM_RX          27
+#define BOARD_MODEM_APN         "free"
 
 esp_modem_dce_t* initialize_modem(void);
 esp_err_t board_send_sms(esp_modem_dce_t *dce, const char *phone_number, const char *message);

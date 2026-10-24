@@ -42,6 +42,7 @@ Carte type **LilyGo T-A7670G** (ESP32 + modem A7670G) :
 Toutes les routes commencent par `/api/v1`. Le détail complet avec exemples de requêtes est disponible dans [api.http](api.http).
 
 ## Bugs connus 
+- Il faut définir manuellement l'APN ici [board.h](./main/board.h#L15)
 - Pas de gestion de doublons sur les contacts / possible d'écraser l'ID par défaut   
 - Instabilité sur la connexion avec la centrale. certainement lié aux limites de l'ESP sur les interactions sortantes et entrantes  
 - Problème sur la récupération de la liste des SMS dès que l'on en supprime un qui n'est pas le dernier   

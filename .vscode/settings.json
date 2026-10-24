@@ -22,7 +22,6 @@
   "idf.openOcdConfigs": [
     "board/esp32-wrover-kit-3.3v.cfg"
   ],
-  "idf.portWin": "COM3",
   "idf.currentSetup": "E:\\esp\\.espressif\\v6.1\\esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32"
@@ -33,5 +32,7 @@
     "--query-driver=**",
     "--compile-commands-dir=e:\\Projects\\esp-a7670g\\esp-a7670g\\build"
   ],
-  "idf.flashType": "UART"
+  "idf.flashType": "UART",
+  "idf.port": "COM4",
+  "idf.monitorPort": "COM4"
 }

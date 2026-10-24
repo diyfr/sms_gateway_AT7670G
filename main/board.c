@@ -12,6 +12,126 @@
 
 [[maybe_unused]] static const char *TAG = "board";
 
+
+
+static void board_log_at_command(
+    esp_modem_dce_t *dce,
+    const char *command,
+    uint32_t timeout_ms)
+{
+    char response[2048] = {0};
+
+    ESP_LOGI(TAG, "========== %s ==========", command);
+
+    char at_command[128];
+    snprintf(at_command, sizeof(at_command),
+             "%s\r\n", command);
+
+    esp_err_t err = esp_modem_at_raw(
+        dce,
+        at_command,
+        response,
+        "OK",
+        "ERROR",
+        timeout_ms
+    );
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Réponse :\n%s", response);
+    } else {
+        ESP_LOGW(TAG,
+                 "Commande %s : erreur %s",
+                 command, esp_err_to_name(err));
+
+        ESP_LOGW(TAG, "Réponse brute :\n%s", response);
+    }
+}
+
+void board_modem_diagnostic(esp_modem_dce_t *dce)
+{
+    if (dce == NULL) {
+        ESP_LOGE(TAG, "Modem non initialisé");
+        return;
+    }
+
+    ESP_LOGI(TAG, "================================");
+    ESP_LOGI(TAG, " DIAGNOSTIC SIMCOM A7670G / LTE");
+    ESP_LOGI(TAG, "================================");
+
+    board_log_at_command(dce, "AT", 2000);
+    board_log_at_command(dce, "ATE0", 2000);
+    board_log_at_command(dce, "AT+CMEE=2", 2000);
+
+    // Identification modem et firmware
+    board_log_at_command(dce, "ATI", 3000);
+    board_log_at_command(dce, "AT+CGMR", 3000);
+
+    // Carte SIM
+    board_log_at_command(dce, "AT+CPIN?", 3000);
+
+    // Configuration réseau
+    board_log_at_command(dce, "AT+CFUN?", 3000);
+    board_log_at_command(dce, "AT+CNMP?", 3000);
+
+    // Active les causes détaillées de rejet LTE
+    board_log_at_command(dce, "AT+CEREG=3", 3000);
+
+    // Enregistrement LTE
+    board_log_at_command(dce, "AT+CEREG?", 3000);
+
+    // Réseau et technologie radio
+    board_log_at_command(dce, "AT+CPSI?", 3000);
+    board_log_at_command(dce, "AT+COPS?", 5000);
+
+    // Qualité du signal
+    board_log_at_command(dce, "AT+CSQ", 3000);
+    board_log_at_command(dce, "AT+CESQ", 3000);
+
+    // Configuration SMS
+    board_log_at_command(dce, "AT+CSMS?", 3000);
+    board_log_at_command(dce, "AT+CSCA?", 3000);
+
+    ESP_LOGI(TAG, "===== FIN DIAGNOSTIC LTE =====");
+}
+
+void board_extended_tests_lte(esp_modem_dce_t *dce)
+{
+    if (dce == NULL) {
+        ESP_LOGE(TAG, "Modem NULL");
+        return;
+    }
+
+    ESP_LOGI(TAG, "===== EXTENDED TESTS MOBILE LTE =====");
+
+    // Mode LTE uniquement
+    board_log_at_command(dce, "AT+CNMP=38", 5000);
+
+    // Vérifier que le mode est appliqué
+    board_log_at_command(dce, "AT+CNMP?", 3000);
+
+    // Diagnostic d'enregistrement EPS standard
+    board_log_at_command(dce, "AT+CEREG=2", 3000);
+
+    // Surveillance pendant 60 secondes
+    for (int i = 0; i < 4; i++) {
+
+        ESP_LOGI(TAG,
+                 "===== LTE : contrôle %d/12 =====",
+                 i + 1);
+        board_log_at_command(dce, "AT+CEREG?", 3000);
+        board_log_at_command(dce, "AT+CPSI?", 3000);
+        board_log_at_command(dce, "AT+CSQ", 3000);
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+
+    board_log_at_command(dce, "AT+CGDCONT?", 3000);
+    // Informations opérateur
+    board_log_at_command(dce, "AT+COPS?", 5000);
+
+    ESP_LOGI(TAG, "===== FIN EXTENDED TESTS LTE =====");
+}
+
+
 esp_modem_dce_t* initialize_modem(void) {
     // esp_modem's DCE factory requires a non-null netif even when only AT/SMS commands are used
     esp_netif_config_t netif_ppp_config = ESP_NETIF_DEFAULT_PPP();
@@ -50,7 +170,51 @@ esp_modem_dce_t* initialize_modem(void) {
         esp_netif_destroy(modem_netif);
         return NULL;
     }
+    
+    vTaskDelay(pdMS_TO_TICKS(5000));
 
+    // 4. on force le mode 4G uniquement
+    char response[256] = {0};
+
+    esp_err_t err = esp_modem_at_raw(
+        dce,
+        "AT+CNMP=38\r\n",
+        response,
+        "OK",
+        "ERROR",
+        5000
+    );
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Impossible de forcer le mode LTE");
+    }
+
+    // 5. On définit l'APN, certains opérateurs le demande pour terminer l'accès au réseau
+    char command[128];
+    snprintf(command, sizeof(command),
+             "AT+CGDCONT=1,\"IP\",\"%s\"\r\n",
+             BOARD_MODEM_APN);
+
+    ESP_LOGI(TAG, "Configuration APN : %s",
+             BOARD_MODEM_APN);
+
+    esp_err_t errApn = esp_modem_at_raw(
+        dce,
+        command,
+        response,
+        "OK",
+        "ERROR",
+        5000
+    );
+
+    if (errApn != ESP_OK) {
+        ESP_LOGE(TAG, "Erreur APN : %s", response);
+    }
+
+    //board_modem_diagnostic(dce);
+
+    //board_extended_tests_lte(dce);
+    
     return dce; // On retourne l'objet utilisable pour les SMS
 }
 
@@ -588,14 +752,14 @@ char* board_get_status_json(esp_modem_dce_t *dce) {
             cJSON_AddStringToObject(root, "smsc", "timeout");
         }
 
-        // 7. Clé "network_registered" : État d'enregistrement sur le réseau (AT+CREG?)
+        // 7. Clé "network_registered" : État d'enregistrement sur le réseau (AT+CEREG?)
         memset(response_buffer, 0, sizeof(response_buffer));
-        if (esp_modem_at_raw(dce, "AT+CREG?\r\n", response_buffer, "OK", "ERROR", 2000) == ESP_OK) {
-            // La réponse ressemble à : +CREG: 0,1 (stat: 1=domicile, 5=itinérance)
+        if (esp_modem_at_raw(dce, "AT+CEREG?\r\n", response_buffer, "OK", "ERROR", 2000) == ESP_OK) {
+            // La réponse ressemble à : +CEREG: 0,1 (stat: 1=domicile, 5=itinérance)
             // Même remarque que pour +CPMS: on cherche le marqueur au lieu d'ancrer le sscanf au début.
-            char *creg_pos = strstr(response_buffer, "+CREG:");
+            char *creg_pos = strstr(response_buffer, "+CEREG:");
             int mode = 0, stat = -1;
-            if (creg_pos && sscanf(creg_pos, "+CREG: %d,%d", &mode, &stat) == 2) {
+            if (creg_pos && sscanf(creg_pos, "+CEREG: %d,%d", &mode, &stat) == 2) {
                 cJSON_AddBoolToObject(root, "network_registered", (stat == 1 || stat == 5));
                 cJSON_AddNumberToObject(root, "network_reg_status", stat);
             } else {
