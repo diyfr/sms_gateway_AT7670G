@@ -1,0 +1,83 @@
+
+## A adapter en fonction du nommage des sensor par HASS
+type: vertical-stack
+cards:
+  - type: markdown
+    content: |
+      ## 📡 Meain GW
+      **Supervision Meian Gateway**
+
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      - type: tile
+        entity: sensor.meain_gw_tension_batterie
+        name: Batterie
+        icon: mdi:battery
+        color: green
+        vertical: true
+        features:
+          - type: trend-graph
+
+      - type: tile
+        entity: sensor.meain_gw_tension_solaire
+        name: Tension solaire
+        icon: mdi:solar-power
+        color: amber
+        vertical: true
+        features:
+          - type: trend-graph
+
+      - type: tile
+        entity: sensor.meain_gw_signal_rssi_2
+        name: Signal RSSI
+        icon: mdi:signal
+        color: blue
+        vertical: true
+        features:
+          - type: trend-graph
+
+      - type: tile
+        entity: sensor.meain_gw_type_reseau_2
+        name: Réseau
+        icon: mdi:radio-tower
+        color: cyan
+        vertical: true
+
+  - type: entities
+    title: État du modem
+    show_header_toggle: false
+    entities:
+      - entity: binary_sensor.meain_gw_modem_connecte_2
+        name: Modem connecté
+        icon: mdi:router-wireless
+
+      - entity: binary_sensor.meain_gw_reseau_enregistre_2
+        name: Réseau enregistré
+        icon: mdi:check-network
+
+      - entity: sensor.meian_gw_modem
+        name: Modèle modem
+        icon: mdi:chip
+
+      - entity: sensor.meain_gw_sms_recus_2
+        name: SMS stockés
+        icon: mdi:message-text
+
+      - entity: sensor.meain_gw_capacite_sms_2
+        name: Capacité SMS
+        icon: mdi:message-bulleted
+
+      - entity: sensor.meian_gw_version_firmware
+        name: Firmware
+        icon: mdi:code-tags
+
+  - type: history-graph
+    title: Historique batterie & solaire
+    hours_to_show: 24
+    entities:
+      - entity: sensor.meain_gw_tension_batterie
+        name: Batterie
+      - entity: meain_gw_tension_solaire
+        name: Solaire

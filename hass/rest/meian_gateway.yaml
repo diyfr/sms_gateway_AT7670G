@@ -1,0 +1,82 @@
+- resource: "http://192.168.0.xx/api/v1/system/info"
+  scan_interval: 60
+  headers:
+    User-Agent: Home Assistant
+    Content-Type: application/json
+  sensor:
+    - name: "Meain GW - Tension batterie"
+      unique_id: meian_gw_battery_mv
+      value_template: "{{ value_json.battery_mv }}"
+      unit_of_measurement: "mV"
+      device_class: voltage
+      state_class: measurement
+      icon: mdi:battery
+
+    - name: "Meain GW - Tension solaire"
+      unique_id: meian_gw_solar_mv
+      value_template: "{{ value_json.solar_mv }}"
+      unit_of_measurement: "mV"
+      device_class: voltage
+      state_class: measurement
+      icon: mdi:solar-power
+  
+    - name: "Meain GW - Version application"
+      unique_id: meian_gw_app_version
+      value_template: "{{ value_json.app_version }}"
+      icon: mdi:tag
+
+    - name: "Meain GW - Version IDF"
+      unique_id: meian_gw_app_version
+      value_template: "{{ value_json.idf_version }}"
+      icon: mdi:tag
+
+- resource: "http://192.168.0.xx/api/v1/board/status"
+  scan_interval: 60
+  headers:
+    User-Agent: Home Assistant
+    Content-Type: application/json
+  sensor:
+    - name: "Meain GW Signal RSSI"
+      unique_id: meian_gw_rssi
+      value_template: "{{ value_json.signal_rssi }}"
+      state_class: measurement
+
+    - name: "Meain GW Type Réseau"
+      unique_id: meian_gw_network_type
+      value_template: "{{ value_json.network_type }}"
+
+    - name: "Meain GW Statut Réseau"
+      unique_id: meian_gw_network_status
+      value_template: "{{ value_json.network_reg_status }}"
+
+    - name: "Meain GW SMS Reçus"
+      unique_id: meian_gw_sms_count
+      value_template: "{{ value_json.sms_count }}"
+      state_class: measurement
+
+    - name: "Meain GW Capacité SMS"
+      unique_id: meian_gw_sms_capacity
+      value_template: "{{ value_json.sms_max_capacity }}"
+
+    - name: "Meain GW Modem"
+      unique_id: meian_gw_modem_model
+      value_template: "{{ value_json.model }}"
+
+    - name: "Meain GW Révision Modem"
+      unique_id: meian_gw_modem_revision
+      value_template: "{{ value_json.revision }}"
+
+    - name: "Meain GW Fabricant Modem"
+      unique_id: meian_gw_modem_manufacturer
+      value_template: "{{ value_json.manufacturer }}"
+
+  binary_sensor:
+    - name: "Meain GW Modem Connecté"
+      unique_id: meian_gw_modem_connected
+      value_template: "{{ value_json.is_up }}"
+      device_class: connectivity
+
+    - name: "Meain GW Réseau Enregistré"
+      unique_id: meian_gw_network_registered
+      value_template: "{{ value_json.network_registered }}"
+      device_class: connectivity

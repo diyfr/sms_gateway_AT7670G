@@ -1,0 +1,25 @@
+send_sms:
+  url: "http://192.168.0.xx/api/v1/sms/send"
+  method: POST
+  headers:
+    X-API-Key: !secret meian_sms_api_key
+    Content-Type: "application/json"
+  payload: '{"to": "{{ to }}", "text": "{{ message }}"}'
+
+clear_sms:
+  url: "http://192.168.0.xx/api/v1/sms/clear"
+  method: DELETE
+  headers:
+    X-API-Key: !secret meian_sms_api_key
+
+delete_sms:
+  url: "http://192.168.0.xx/api/v1/sms/delete?index={{ index }}"
+  method: DELETE
+  headers:
+    X-API-Key: !secret meian_sms_api_key
+
+reboot_gateway:
+  url: "http://192.168.0.xx/api/v1/system/reboot"
+  method: POST
+  headers:
+    X-API-Key: !secret meian_sms_api_key
